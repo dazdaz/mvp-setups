@@ -1,0 +1,113 @@
+SP_PASSWORD=AlisAquilae1975!
+RESOURCE_GROUP_NAME=aks-npappgw-rg
+CLUSTER_NAME=nptest
+LOCATION=southcentralus
+VNET_NAME=aks-vnet
+AAD_ID_NAME=npappgwmsi
+APPGW_NAME=aks-aagw
+# Create a resource group
+az group create --name $RESOURCE_GROUP_NAME --location $LOCATION
+
+# Create a virtual network and subnet
+az network vnet create \
+    --resource-group $RESOURCE_GROUP_NAME \
+    --name $VNET_NAME \
+    --address-prefixes 172.20.0.0/16 \
+    --subnet-name aks-subnet \
+    --subnet-prefix 172.20.0.0/21
+# Create a subnet for the Application gateway
+az network vnet subnet create \
+    --resource-group $RESOURCE_GROUP_NAME \
+    --vnet-name $VNET_NAME \
+    --name appgwsubnet \
+    --address-prefixes 172.20.8.0/24
+
+az network public-ip create \
+  --resource-group $RESOURCE_GROUP_NAME \
+  --name appgwPIP \
+  --sku Standard \
+  --allocation-method Static \
+  --dns-name aagwnp
+
+az identity create -g $RESOURCE_GROUP_NAME -n $AAD_ID_NAME
+
+MSI_ID=$(az identity show -g $RESOURCE_GROUP_NAME -n $AAD_ID_NAME --query id -o tsv)
+
+MSI_PRIN_ID=$(az identity show -g $RESOURCE_GROUP_NAME -n $AAD_ID_NAME --query principalId -o tsv)
+
+az network application-gateway create --name $APPGW_NAME \
+  --resource-group $RESOURCE_GROUP_NAME \
+  --frontend-port 80 \
+  --sku Standard_v2 \
+  --public-ip-address appgwPIP \
+  --capacity 2 \
+  --subnet appgwsubnet \
+  --vnet-name aks-vnet
+
+
+
+# Create a service principal and read in the application ID
+SP_ID=$(az ad sp create-for-rbac --password $SP_PASSWORD --skip-assignment --query appId -o tsv)
+
+# Wait 15 seconds to make sure that service principal has propagated
+echo "Waiting for service principal to propagate..."
+sleep 15
+
+# Get the virtual network resource ID
+VNET_ID=$(az network vnet show --resource-group $RESOURCE_GROUP_NAME --name $VNET_NAME --query id -o tsv)
+
+# Assign the service principal Contributor permissions to the virtual network resource
+az role assignment create --assignee $SP_ID --scope $VNET_ID --role Contributor
+
+# Get the virtual network subnet resource ID
+SUBNET_ID=$(az network vnet subnet show --resource-group $RESOURCE_GROUP_NAME --vnet-name $VNET_NAME --name aks-subnet --query id -o tsv)
+
+RG_ID=$(az group show -n $RESOURCE_GROUP_NAME --query id -o tsv)
+
+APPGW_ID=$(az network application-gateway show -n $APPGW_NAME -g $RESOURCE_GROUP_NAME --query id -o tsv)
+
+# Create the AKS cluster and specify the virtual network and service principal information
+# Enable network policy by using the `--network-policy` parameter
+az aks create \
+    --resource-group $RESOURCE_GROUP_NAME \
+    --name $CLUSTER_NAME \
+    --node-count 1 \
+    --node-vm-size Standard_B4ms \
+    --enable-addons monitoring \
+    --kubernetes-version 1.13.5 \
+    --generate-ssh-keys \
+    --network-plugin azure \
+    --service-cidr 172.21.0.0/16 \
+    --dns-service-ip 172.21.0.10 \
+    --docker-bridge-address 172.17.0.1/16 \
+    --vnet-subnet-id $SUBNET_ID \
+    --service-principal $SP_ID \
+    --client-secret $SP_PASSWORD \
+    --network-policy calico \
+    --enable-vmss \
+    --enable-cluster-autoscaler \
+    --min-count 1 \
+    --max-count 3
+
+az aks get-credentials -n $CLUSTER_NAME -g $RESOURCE_GROUP_NAME
+
+az role assignment create --role "Managed Identity Operator" --assignee $SP_ID --scope $MSI_ID
+
+az role assignment create --role Reader --assignee $MSI_PRIN_ID --scope $RG_ID
+
+az role assignment create --role Contributor --assignee $MSI_PRIN_ID --scope $APPGW_ID
+
+
+kubectl create -f https://raw.githubusercontent.com/Azure/aad-pod-identity/master/deploy/infra/deployment-rbac.yaml
+
+kubectl create serviceaccount --namespace kube-system tiller-sa
+
+kubectl create clusterrolebinding tiller-cluster-rule --clusterrole=cluster-admin --serviceaccount=kube-system:tiller-sa
+
+helm init --tiller-namespace kube-system --service-account tiller-sa
+
+helm repo add application-gateway-kubernetes-ingress https://azure.github.io/application-gateway-kubernetes-ingress/helm/
+
+helm repo update
+
+helm install -f ./network_policy/k8s_manifests/appgw-ic-helmconfig.yaml application-gateway-kubernetes-ingress/ingress-azure

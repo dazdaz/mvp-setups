@@ -1,0 +1,36 @@
+# This file contains the essential configs for the ingress controller helm chart
+
+################################################################################
+# Specify which application gateway the ingress controller will manage
+#
+appgw:
+    subscriptionId: 648dcb5a-de1e-48b2-af6b-fe6ef28d355c
+    resourceGroup: aks-npappgw-rg
+    name: aks-aagw
+
+################################################################################
+# Specify which kubernetes namespace the ingress controller will watch
+# Default value is "default"
+#
+# kubernetes:
+#   watchNamespace: <namespace>
+
+################################################################################
+# Specify the authentication with Azure Resource Manager
+#
+# Two authentication methods are available:
+# - Option 1: AAD-Pod-Identity (https://github.com/Azure/aad-pod-identity)
+armAuth:
+    type: aadPodIdentity
+    identityResourceID: /subscriptions/648dcb5a-de1e-48b2-af6b-fe6ef28d355c/resourcegroups/aks-npappgw-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/npappgwmsi
+    identityClientID:  2afd57cd-1a8a-4fd4-8591-99d9efbcfffc
+
+################################################################################
+# Specify if the cluster is RBAC enabled or not
+rbac:
+    enabled: true # true/false
+
+################################################################################
+# Specify aks cluster related information
+aksClusterConfiguration:
+    apiServerAddress: https://nptest-aks-npappgw-rg-648dcb-56ea5a32.hcp.southcentralus.azmk8s.io
